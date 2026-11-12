@@ -10,6 +10,7 @@ from core.metrics import (
     HTTP_REQUESTS_TOTAL,
     HTTP_REQUEST_DURATION
 )
+from db.pool import init_db_pool, close_db_pool, init_db_schema, check_db_health
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,9 +20,16 @@ async def lifespan(app: FastAPI):
 
     # Initialize Distributed Tracing
     setup_telemetry(app)
+
+    # Initialize PostgreSQL Connection Pool and Verify Schema
+    await init_db_pool()
+    await init_db_schema()
     
     yield
 
+    # Clean up and close connection pool
+    logger.info("Shutting down and draining database connection pool...")
+    await close_db_pool()
     logger.info(f"Shutting down {settings.app_name}...")
 
 app = FastAPI(
@@ -68,9 +76,11 @@ async def root():
 
 @app.get("/healthz")
 async def health_check():
+    db_ok = await check_db_health()
     return {
-        "status": "healthy",
-        "app": settings.app_name
+        "status": "healthy" if db_ok else "degraded",
+        "app": settings.app_name,
+        "database": "connected" if db_ok else "disconnected"
     }
 
 @app.get("/metrics")
