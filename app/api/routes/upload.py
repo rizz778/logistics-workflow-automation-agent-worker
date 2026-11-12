@@ -1,5 +1,6 @@
+import json
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Request
 from schemas.upload_schemas import (
     PresignedUrlsRequest,
@@ -8,13 +9,53 @@ from schemas.upload_schemas import (
     ConfirmUploadRequest,
     ConfirmUploadResponse
 )
+from schemas.queue_schemas import ShipmentTaskEvent, TaskFileItem
 from services.s3_service import s3_service
 from services.db_service import db_service
 from services.hash_service import hash_service
 from services.cache_service import cache_service
+from services.queue_service import queue_service
 from core.logging import logger
 
 router = APIRouter(prefix="/pipeline", tags=["Upload & Ingestion"])
+
+async def _dispatch_shipment_to_queue(shipment_id: str, event_type: str = "INITIAL_PROCESS") -> None:
+    """Helper to assemble verified shipment files and push a task to the Redis Queue."""
+    run = await db_service.get_run_by_shipment_id(shipment_id)
+    if not run:
+        logger.error(f"Cannot dispatch shipment {shipment_id}: run record not found.")
+        return
+
+    files = await db_service.get_shipment_files(shipment_id)
+    task_files = [
+        TaskFileItem(
+            filename=f["filename"],
+            s3_key=f["s3_key"],
+            file_hash=f.get("file_hash"),
+            content_type=f.get("content_type", "application/pdf")
+        )
+        for f in files
+    ]
+
+    email_meta = None
+    if run.get("email_metadata_json"):
+        try:
+            email_meta = json.loads(run["email_metadata_json"])
+        except Exception:
+            pass
+
+    task_event = ShipmentTaskEvent(
+        run_id=run["id"],
+        shipment_id=shipment_id,
+        event_type=event_type,
+        retry_count=0,
+        max_retries=3,
+        files=task_files,
+        source=run.get("source", "manual_upload"),
+        email_metadata=email_meta
+    )
+
+    await queue_service.publish_shipment_task(task_event)
 
 @router.post("/presigned-urls", response_model=PresignedUrlsResponse)
 async def generate_presigned_urls(request: PresignedUrlsRequest):
@@ -53,7 +94,6 @@ async def generate_presigned_urls(request: PresignedUrlsRequest):
                 )
             except Exception as e:
                 logger.error(f"Failed to record cached run in database: {e}")
-                # Fall through to normal upload if DB caching fails
 
     # 2. Cache MISS: Build S3 keys and generate presigned URLs
     files_to_track = []
@@ -110,7 +150,7 @@ async def generate_presigned_urls(request: PresignedUrlsRequest):
 @router.post("/confirm-upload", response_model=ConfirmUploadResponse)
 async def confirm_upload(request: ConfirmUploadRequest):
     """Client calls this endpoint after uploading all files to S3 via presigned URLs.
-    Verifies that all files exist in S3 and transitions status to 'processing'.
+    Verifies that all files exist in S3 and transitions status to 'processing' before queueing.
     """
     shipment_id = request.shipment_id
 
@@ -137,7 +177,9 @@ async def confirm_upload(request: ConfirmUploadRequest):
     current_status = run["status"] if run else "unknown"
 
     if all_ready and current_status == "processing":
-        logger.info(f"All files confirmed in S3 for shipment {shipment_id}. Processing triggered.")
+        logger.info(f"All files confirmed in S3 for shipment {shipment_id}. Pushing to Redis Queue...")
+        await _dispatch_shipment_to_queue(shipment_id, event_type="INITIAL_PROCESS")
+
         return ConfirmUploadResponse(
             shipment_id=shipment_id,
             status="processing",
@@ -181,6 +223,7 @@ async def s3_event_webhook(request: Request):
 
             is_completed = await db_service.mark_file_uploaded_and_check_completion(shipment_id, s3_key)
             if is_completed:
-                logger.info(f"S3 Webhook: All files uploaded for {shipment_id}. Triggering processing.")
+                logger.info(f"S3 Webhook: All files uploaded for {shipment_id}. Pushing to Redis Queue...")
+                await _dispatch_shipment_to_queue(shipment_id, event_type="INITIAL_PROCESS")
 
     return {"status": "ok"}

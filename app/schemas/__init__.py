@@ -7,4 +7,8 @@ from schemas.upload_schemas import (
     ConfirmUploadRequest,
     ConfirmUploadResponse
 )
-
+from schemas.queue_schemas import (
+    TaskFileItem,
+    ShipmentTaskEvent,
+    TaskEventType
+)
