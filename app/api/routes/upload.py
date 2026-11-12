@@ -10,6 +10,8 @@ from schemas.upload_schemas import (
 )
 from services.s3_service import s3_service
 from services.db_service import db_service
+from services.hash_service import hash_service
+from services.cache_service import cache_service
 from core.logging import logger
 
 router = APIRouter(prefix="/pipeline", tags=["Upload & Ingestion"])
@@ -17,12 +19,43 @@ router = APIRouter(prefix="/pipeline", tags=["Upload & Ingestion"])
 @router.post("/presigned-urls", response_model=PresignedUrlsResponse)
 async def generate_presigned_urls(request: PresignedUrlsRequest):
     """Generates S3 presigned PUT URLs for direct client-to-S3 upload.
-    Records the shipment and expected files in PostgreSQL.
+    Checks Redis Cache first: if the document packet has already been verified,
+    it returns the cached results immediately (bypassing S3 upload and worker queue).
     """
-    # 1. Generate unique shipment identifier
     shipment_id = f"ship_{uuid.uuid4().hex[:12]}"
+    filenames = [f.filename for f in request.files]
 
-    # 2. Build S3 keys and generate presigned URLs
+    # 1. Fast-Path Redis Cache Check (if client provided file hashes)
+    all_hashed = all(f.file_hash for f in request.files)
+    if all_hashed:
+        file_hashes = [f.file_hash for f in request.files if f.file_hash]
+        cache_key = hash_service.build_shipment_cache_key(file_hashes)
+        cached_result = await cache_service.get_shipment_cache(cache_key)
+
+        if cached_result:
+            logger.info(f"⚡ FAST-PATH CACHE HIT for shipment {shipment_id}. Bypassing S3 upload and worker queue.")
+            try:
+                run_id = await db_service.create_cached_run(
+                    cached_data=cached_result,
+                    filenames=filenames,
+                    source=request.source,
+                    shipment_id=shipment_id,
+                    email_sender=request.email_sender,
+                    email_metadata=request.email_metadata
+                )
+                return PresignedUrlsResponse(
+                    run_id=run_id,
+                    shipment_id=shipment_id,
+                    status=cached_result.get("status", "approved"),
+                    is_cached=True,
+                    files=[],  # Empty list instructs client to skip S3 upload
+                    cached_results=cached_result
+                )
+            except Exception as e:
+                logger.error(f"Failed to record cached run in database: {e}")
+                # Fall through to normal upload if DB caching fails
+
+    # 2. Cache MISS: Build S3 keys and generate presigned URLs
     files_to_track = []
     response_items = []
 
@@ -105,7 +138,6 @@ async def confirm_upload(request: ConfirmUploadRequest):
 
     if all_ready and current_status == "processing":
         logger.info(f"All files confirmed in S3 for shipment {shipment_id}. Processing triggered.")
-        # Queue push will be plugged here in Step 4/5
         return ConfirmUploadResponse(
             shipment_id=shipment_id,
             status="processing",
@@ -142,7 +174,6 @@ async def s3_event_webhook(request: Request):
         if not s3_key or not s3_key.startswith("shipments/"):
             continue
 
-        # Extract shipment_id from path: shipments/{shipment_id}/{filename}
         parts = s3_key.split("/")
         if len(parts) >= 3:
             shipment_id = parts[1]
@@ -151,7 +182,5 @@ async def s3_event_webhook(request: Request):
             is_completed = await db_service.mark_file_uploaded_and_check_completion(shipment_id, s3_key)
             if is_completed:
                 logger.info(f"S3 Webhook: All files uploaded for {shipment_id}. Triggering processing.")
-                # Queue push will be plugged here in Step 4/5
 
     return {"status": "ok"}
-

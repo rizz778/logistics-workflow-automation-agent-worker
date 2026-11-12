@@ -1,6 +1,7 @@
 # app/interfaces
 from interfaces.repository import PipelineRunRepository
 from interfaces.storage import ObjectStorageInterface
+from interfaces.cache import CacheServiceInterface
 from interfaces.queries import (
     INIT_SCHEMA_SQL,
     HEALTH_CHECK_SQL,
