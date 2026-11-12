@@ -28,6 +28,11 @@ class ObjectStorageInterface(ABC):
         pass
 
     @abstractmethod
+    def upload_bytes(self, s3_key: str, data: bytes, content_type: str = "application/pdf") -> None:
+        """Uploads raw bytes directly to the object storage bucket."""
+        pass
+
+    @abstractmethod
     def ensure_bucket_exists(self) -> None:
         """Verifies or auto-initializes the destination bucket (useful for local MinIO)."""
         pass

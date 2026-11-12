@@ -1,7 +1,7 @@
 import json
 import uuid
 from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, status, Request, Depends
+from fastapi import APIRouter, HTTPException, status, Request, Depends, UploadFile, File
 from schemas.upload_schemas import (
     PresignedUrlsRequest,
     PresignedUrlsResponse,
@@ -199,6 +199,56 @@ async def confirm_upload(request: ConfirmUploadRequest):
         message="Some files are still pending upload in S3.",
         all_files_ready=False
     )
+
+@router.post("/upload")
+async def upload_direct_file(
+    file: UploadFile = File(...),
+    source: str = "manual_upload"
+):
+    """Direct multipart file upload endpoint.
+    Uploads the file directly to S3 / MinIO, creates the shipment record in PostgreSQL,
+    and dispatches the task to the Redis Streams queue for agent worker processing.
+    """
+    shipment_id = f"ship_{uuid.uuid4().hex[:12]}"
+    filename = file.filename or "document.pdf"
+    content_type = file.content_type or "application/pdf"
+    s3_key = f"shipments/{shipment_id}/{filename}"
+
+    # Read and persist file bytes to S3
+    content_bytes = await file.read()
+    if not content_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    s3_service.upload_bytes(s3_key=s3_key, data=content_bytes, content_type=content_type)
+
+    # Persist in DB
+    files_to_track = [{
+        "filename": filename,
+        "s3_key": s3_key,
+        "content_type": content_type,
+        "file_hash": None
+    }]
+    run_id = await db_service.create_shipment_with_files(
+        shipment_id=shipment_id,
+        files=files_to_track,
+        source=source,
+        initial_status="processing"
+    )
+
+    # Mark file as uploaded in DB
+    await db_service.mark_file_uploaded_and_check_completion(shipment_id, s3_key)
+
+    # Dispatch to worker queue
+    await _dispatch_shipment_to_queue(shipment_id, event_type="INITIAL_PROCESS")
+    logger.info(f"Direct upload: Created Run {run_id} ({shipment_id}) for '{filename}' and queued for processing.")
+
+    return {
+        "id": run_id,
+        "shipment_id": shipment_id,
+        "filename": filename,
+        "status": "processing",
+        "message": "File uploaded to storage and queued for multi-agent compliance pipeline."
+    }
 
 @router.post("/webhooks/s3")
 async def s3_event_webhook(request: Request):

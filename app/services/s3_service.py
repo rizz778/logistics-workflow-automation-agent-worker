@@ -83,8 +83,22 @@ class S3StorageService(ObjectStorageInterface):
             logger.warning(f"Error checking object {s3_key} in S3: {e}")
             return False
 
+    def upload_bytes(self, s3_key: str, data: bytes, content_type: str = "application/pdf") -> None:
+        """Uploads raw bytes directly to S3 / MinIO."""
+        try:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=s3_key,
+                Body=data,
+                ContentType=content_type
+            )
+            logger.info(f"Successfully uploaded {len(data)} bytes to S3 object '{s3_key}'.")
+        except Exception as e:
+            logger.error(f"Failed to upload bytes to S3 '{s3_key}': {e}")
+            raise
+
     def ensure_bucket_exists(self) -> None:
-        """Auto-creates the bucket if missing (ideal for MinIO in local dev)."""
+        """Auto-creates the bucket if missing (ideal for MinIO in local dev) and ensures CORS is configured."""
         try:
             self.client.head_bucket(Bucket=self.bucket)
             logger.info(f"S3/MinIO bucket '{self.bucket}' verified.")
@@ -105,6 +119,21 @@ class S3StorageService(ObjectStorageInterface):
                     logger.error(f"Failed to auto-create bucket '{self.bucket}': {create_err}")
             else:
                 logger.warning(f"Could not connect to S3 bucket '{self.bucket}': {e}")
+
+        # Ensure CORS is configured for direct browser presigned PUT uploads
+        try:
+            cors_configuration = {
+                'CORSRules': [{
+                    'AllowedHeaders': ['*'],
+                    'AllowedMethods': ['GET', 'PUT', 'POST', 'HEAD'],
+                    'AllowedOrigins': ['*'],
+                    'ExposeHeaders': ['ETag']
+                }]
+            }
+            self.client.put_bucket_cors(Bucket=self.bucket, CORSConfiguration=cors_configuration)
+            logger.info(f"S3/MinIO bucket '{self.bucket}' CORS policy configured for direct browser uploads.")
+        except Exception as cors_err:
+            logger.debug(f"Could not set bucket CORS (may already be set or not supported): {cors_err}")
 
     def check_storage_health(self) -> bool:
         """Healthcheck verification probe."""
