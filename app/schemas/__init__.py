@@ -12,3 +12,4 @@ from schemas.queue_schemas import (
     ShipmentTaskEvent,
     TaskEventType
 )
+from schemas.status_schemas import UpdateStatusRequest
