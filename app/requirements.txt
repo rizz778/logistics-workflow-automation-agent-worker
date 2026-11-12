@@ -1,0 +1,28 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.1
+python-multipart>=0.0.9
+
+# PostgreSQL Connection Pooling (Psycopg 3)
+psycopg[binary,pool]>=3.2.0
+
+# Redis (Cache & Message Queue)
+redis>=5.0.0
+
+# Object Storage (S3 / MinIO)
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Async HTTP Client
+httpx>=0.27.0
+
+# Monitoring & Metrics (Prometheus)
+prometheus-client>=0.20.0
+
+# Distributed Tracing (OpenTelemetry)
+opentelemetry-api>=1.24.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-instrumentation-fastapi>=0.45b0
+opentelemetry-exporter-otlp>=1.24.0
