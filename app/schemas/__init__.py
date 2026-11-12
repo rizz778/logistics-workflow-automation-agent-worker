@@ -13,3 +13,4 @@ from schemas.queue_schemas import (
     TaskEventType
 )
 from schemas.status_schemas import UpdateStatusRequest
+from schemas.query_schemas import QueryRequest, QueryResponse
