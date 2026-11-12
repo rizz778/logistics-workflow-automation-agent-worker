@@ -11,6 +11,8 @@ from core.metrics import (
     HTTP_REQUEST_DURATION
 )
 from db.pool import init_db_pool, close_db_pool, init_db_schema, check_db_health
+from services.s3_service import s3_service
+from api.router import api_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,6 +26,9 @@ async def lifespan(app: FastAPI):
     # Initialize PostgreSQL Connection Pool and Verify Schema
     await init_db_pool()
     await init_db_schema()
+
+    # Verify or initialize S3 bucket
+    s3_service.ensure_bucket_exists()
     
     yield
 
@@ -46,6 +51,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount API Routers
+app.include_router(api_router)
 
 # Prometheus Metrics Middleware
 @app.middleware("http")
@@ -77,10 +85,13 @@ async def root():
 @app.get("/healthz")
 async def health_check():
     db_ok = await check_db_health()
+    storage_ok = s3_service.check_storage_health()
+    all_healthy = db_ok and storage_ok
     return {
-        "status": "healthy" if db_ok else "degraded",
+        "status": "healthy" if all_healthy else "degraded",
         "app": settings.app_name,
-        "database": "connected" if db_ok else "disconnected"
+        "database": "connected" if db_ok else "disconnected",
+        "storage": "connected" if storage_ok else "disconnected"
     }
 
 @app.get("/metrics")

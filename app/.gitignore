@@ -1,2 +1,38 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
 .env
-\venv
+.env.*
+!.env.example
+venv/
+env/
+ENV/
+.venv/
+
+# Pytest / Coverage / Linting
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Logs & Temporary Files
+*.log
+*.sqlite
+*.db
+
+# Operating System
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo

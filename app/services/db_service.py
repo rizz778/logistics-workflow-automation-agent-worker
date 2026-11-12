@@ -4,8 +4,13 @@ from db.pool import get_db_connection
 from interfaces.repository import PipelineRunRepository
 from interfaces.queries import (
     INSERT_QUEUED_RUN_SQL,
+    INSERT_SHIPMENT_FILE_SQL,
     INSERT_CACHED_RUN_SQL,
     SELECT_RUN_BY_ID_SQL,
+    SELECT_RUN_BY_SHIPMENT_ID_SQL,
+    SELECT_SHIPMENT_FILES_SQL,
+    MARK_FILE_UPLOADED_SQL,
+    CHECK_AND_TRANSITION_SHIPMENT_SQL,
     SELECT_INCOMING_RUNS_SQL,
     SELECT_PROCESSED_RUNS_SQL,
     UPDATE_RUN_STATUS_SQL,
@@ -17,26 +22,89 @@ from interfaces.queries import (
 class PostgresPipelineRunRepository(PipelineRunRepository):
     """PostgreSQL implementation of the PipelineRunRepository interface."""
 
-    async def create_queued_run(
+    async def create_shipment_with_files(
         self,
-        filenames: List[str],
+        shipment_id: str,
+        files: List[Dict[str, Any]],
         source: str = "manual_upload",
-        shipment_id: Optional[str] = None,
         email_sender: Optional[str] = None,
-        email_metadata: Optional[Dict[str, Any]] = None
+        email_metadata: Optional[Dict[str, Any]] = None,
+        initial_status: str = "pending_upload"
     ) -> int:
-        """Inserts an initial shipment record with 'queued' status and returns its generated ID."""
+        """Atomically inserts a shipment run and its expected files into shipment_files."""
+        filenames = [f["filename"] for f in files]
         filename_str = ", ".join(filenames)
         email_meta_json = json.dumps(email_metadata) if email_metadata else None
+        total_files = len(files)
 
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
+                # 1. Insert shipment pipeline run
                 await cur.execute(
                     INSERT_QUEUED_RUN_SQL,
-                    (shipment_id, filename_str, source, email_sender, email_meta_json)
+                    (
+                        shipment_id,
+                        filename_str,
+                        total_files,
+                        initial_status,
+                        source,
+                        email_sender,
+                        email_meta_json
+                    )
                 )
                 row = await cur.fetchone()
-                return row["id"]
+                run_id = row["id"]
+
+                # 2. Insert all expected files
+                for f in files:
+                    await cur.execute(
+                        INSERT_SHIPMENT_FILE_SQL,
+                        (
+                            shipment_id,
+                            run_id,
+                            f["filename"],
+                            f["s3_key"],
+                            f.get("file_hash"),
+                            f.get("content_type")
+                        )
+                    )
+
+                return run_id
+
+    async def mark_file_uploaded_and_check_completion(
+        self,
+        shipment_id: str,
+        s3_key: str
+    ) -> bool:
+        """Atomically marks a file as uploaded and transitions shipment to 'processing'
+        if and only if all expected files have landed in S3.
+        Returns True if this exact invocation transitioned the shipment.
+        """
+        async with get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                # 1. Mark this specific file uploaded
+                await cur.execute(MARK_FILE_UPLOADED_SQL, (shipment_id, s3_key))
+
+                # 2. Check and atomically transition run status if all files uploaded
+                await cur.execute(CHECK_AND_TRANSITION_SHIPMENT_SQL, (shipment_id, shipment_id))
+                res = await cur.fetchone()
+
+                # If status returned is 'processing', this call completed the batch!
+                return bool(res and res["status"] == "processing")
+
+    async def get_shipment_files(self, shipment_id: str) -> List[Dict[str, Any]]:
+        """Retrieves all tracked files for a shipment."""
+        async with get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(SELECT_SHIPMENT_FILES_SQL, (shipment_id,))
+                return await cur.fetchall()
+
+    async def get_run_by_shipment_id(self, shipment_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a shipment run by its unique shipment_id string."""
+        async with get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(SELECT_RUN_BY_SHIPMENT_ID_SQL, (shipment_id,))
+                return await cur.fetchone()
 
     async def create_cached_run(
         self,
@@ -51,6 +119,7 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
         filename_str = ", ".join(filenames)
         decision = cached_data.get("decision", "flag_review")
         status = "approved" if decision == "auto_approve" else "pending_review"
+        total_files = len(filenames)
 
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
@@ -59,6 +128,8 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                     (
                         shipment_id,
                         filename_str,
+                        total_files,
+                        total_files,  # uploaded_files_count matches total
                         json.dumps(cached_data.get("extracted_data", {})),
                         json.dumps(cached_data.get("validation_results", {})),
                         decision,
