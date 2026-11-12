@@ -1,15 +1,20 @@
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from schemas.status_schemas import UpdateStatusRequest
 from schemas.queue_schemas import ShipmentTaskEvent, TaskFileItem
 from services.db_service import db_service
 from services.s3_service import s3_service
 from services.queue_service import queue_service
+from services.rate_limiter import rate_limit_dependency
+from core.config import settings
 from core.logging import logger
 
 router = APIRouter(prefix="/pipeline", tags=["Status, History & Review"])
 
-@router.get("/status/{run_id}")
+@router.get(
+    "/status/{run_id}",
+    dependencies=[Depends(rate_limit_dependency("status", settings.rate_limit_status_rpm, 60))]
+)
 async def get_run_status(run_id: int):
     """Retrieves live status, decision, and results for a single shipment run.
     Also generates temporary presigned download URLs for document previews.
@@ -111,4 +116,3 @@ async def update_run_status(run_id: int, request: UpdateStatusRequest):
         "message": f"Run {run_id} updated successfully.",
         "reprocess_queued": bool(request.edited_data)
     }
-

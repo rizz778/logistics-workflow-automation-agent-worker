@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     otel_service_name: str
     otel_exporter_otlp_endpoint: Optional[str] = None
 
+    # Rate Limiting (Requests Per Minute)
+    rate_limit_enabled: bool
+    rate_limit_upload_rpm: int
+    rate_limit_query_rpm: int
+    rate_limit_status_rpm: int
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
         env_file_encoding="utf-8",

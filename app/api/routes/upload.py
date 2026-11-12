@@ -1,7 +1,7 @@
 import json
 import uuid
 from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, status, Request
+from fastapi import APIRouter, HTTPException, status, Request, Depends
 from schemas.upload_schemas import (
     PresignedUrlsRequest,
     PresignedUrlsResponse,
@@ -15,6 +15,8 @@ from services.db_service import db_service
 from services.hash_service import hash_service
 from services.cache_service import cache_service
 from services.queue_service import queue_service
+from services.rate_limiter import rate_limit_dependency
+from core.config import settings
 from core.logging import logger
 
 router = APIRouter(prefix="/pipeline", tags=["Upload & Ingestion"])
@@ -57,7 +59,11 @@ async def _dispatch_shipment_to_queue(shipment_id: str, event_type: str = "INITI
 
     await queue_service.publish_shipment_task(task_event)
 
-@router.post("/presigned-urls", response_model=PresignedUrlsResponse)
+@router.post(
+    "/presigned-urls",
+    response_model=PresignedUrlsResponse,
+    dependencies=[Depends(rate_limit_dependency("upload", settings.rate_limit_upload_rpm, 60))]
+)
 async def generate_presigned_urls(request: PresignedUrlsRequest):
     """Generates S3 presigned PUT URLs for direct client-to-S3 upload.
     Checks Redis Cache first: if the document packet has already been verified,
