@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # LLM Settings
     default_llm_provider: str = "gemini"
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.5-flash"
     gemini_api_key: Optional[str] = None
     mistral_ocr_model: str = "mistral-ocr-latest"
     mistral_extract_model: str = "pixtral-large-latest"
