@@ -34,6 +34,8 @@ services:
         value: mistral-ocr-latest
       - key: MISTRAL_EXTRACT_MODEL
         value: pixtral-large-latest
+      - key: MISTRAL_MODEL
+        value: mistral-large-latest
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL

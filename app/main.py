@@ -60,7 +60,9 @@ async def lifespan(app: FastAPI):
             worker_task = asyncio.create_task(worker_daemon.start())
             logger.info("Embedded Trade Document Agent Worker started in background task.")
         except Exception as we:
-            logger.warning(f"Could not start embedded agent worker: {we}")
+            import traceback
+            logger.error(f"CRITICAL: Could not start embedded agent worker: {we}")
+            logger.error(traceback.format_exc())
 
     yield
 

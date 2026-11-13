@@ -3,7 +3,12 @@ from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Always resolve .env from the project root, regardless of CWD
-_ENV_FILE = Path(__file__).parent.parent / ".env"
+# Try agent-local .env first, fall back to gateway app/.env
+_AGENT_DIR = Path(__file__).parent.parent
+_ENV_FILE = _AGENT_DIR / ".env"
+if not _ENV_FILE.exists():
+    # Embedded mode: gateway/agent/ — check gateway/app/.env
+    _ENV_FILE = _AGENT_DIR.parent / "app" / ".env"
 
 class Settings(BaseSettings):
     # Application
@@ -40,6 +45,7 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     mistral_ocr_model: str = "mistral-ocr-latest"
     mistral_extract_model: str = "pixtral-large-latest"
+    mistral_model: str = "mistral-large-latest"
     mistral_api_key: Optional[str] = None
     openai_model: str = "gpt-4o-mini"
     openai_api_key: Optional[str] = None
