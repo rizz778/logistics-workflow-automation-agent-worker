@@ -1,4 +1,6 @@
 import boto3
+import socket
+from urllib.parse import urlparse
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from core.config import settings
@@ -97,13 +99,53 @@ class S3StorageService(ObjectStorageInterface):
             logger.error(f"Failed to upload bytes to S3 '{s3_key}': {e}")
             raise
 
+    def download_bytes(self, s3_key: str) -> bytes:
+        """Downloads raw bytes of an object from S3 / MinIO."""
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=s3_key)
+            return response["Body"].read()
+        except Exception as e:
+            logger.error(f"Failed to download bytes from S3 '{s3_key}': {e}")
+            raise
+
+    def _is_storage_reachable(self, timeout: float = 1.5) -> bool:
+        """Fast socket probe to check if S3/MinIO endpoint is active.
+        For remote HTTPS endpoints (e.g. Supabase, AWS), always returns True
+        since they are assumed reachable. Only probes localhost endpoints.
+        """
+        if not settings.s3_endpoint_url:
+            return True
+        try:
+            parsed = urlparse(settings.s3_endpoint_url)
+            host = parsed.hostname or "127.0.0.1"
+            # Only probe localhost - remote cloud endpoints are assumed reachable
+            if host not in ("localhost", "127.0.0.1"):
+                return True
+            # Determine correct port: use parsed port, then scheme default, then 9000
+            if parsed.port:
+                port = parsed.port
+            elif parsed.scheme == "https":
+                port = 443
+            elif parsed.scheme == "http":
+                port = 80
+            else:
+                port = 9000
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
     def ensure_bucket_exists(self) -> None:
         """Auto-creates the bucket if missing (ideal for MinIO in local dev) and ensures CORS is configured."""
+        if not self._is_storage_reachable():
+            logger.warning("MinIO/S3 storage is not running on port 9000. Continuing startup.")
+            return
+
         try:
             self.client.head_bucket(Bucket=self.bucket)
             logger.info(f"S3/MinIO bucket '{self.bucket}' verified.")
         except ClientError as e:
-            error_code = e.response["Error"]["Code"]
+            error_code = e.response.get("Error", {}).get("Code")
             if error_code in ("404", "NoSuchBucket"):
                 logger.info(f"Bucket '{self.bucket}' not found. Creating it...")
                 try:
@@ -119,6 +161,9 @@ class S3StorageService(ObjectStorageInterface):
                     logger.error(f"Failed to auto-create bucket '{self.bucket}': {create_err}")
             else:
                 logger.warning(f"Could not connect to S3 bucket '{self.bucket}': {e}")
+        except Exception as conn_err:
+            logger.warning(f"S3/MinIO storage is not running ({conn_err}). Continuing startup.")
+            return
 
         # Ensure CORS is configured for direct browser presigned PUT uploads
         try:

@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import time
@@ -9,6 +10,8 @@ from schemas.queue_schemas import ShipmentTaskEvent, TaskFileItem
 from services.db_service import db_service
 from services.s3_service import s3_service
 from services.queue_service import queue_service
+from services.hash_service import hash_service
+from services.cache_service import cache_service
 from services.rate_limiter import rate_limit_dependency
 from db.redis import get_redis
 from core.config import settings
@@ -66,6 +69,30 @@ async def get_analytics():
     """Retrieves aggregated metrics for the dashboard summary cards."""
     return await db_service.get_analytics()
 
+@router.get("/rules")
+async def get_rules():
+    """Retrieves compliance rules for the Sidebar rules inspector."""
+    config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config")
+    rules_file = os.path.join(config_dir, "rules.json")
+    if os.path.exists(rules_file):
+        try:
+            with open(rules_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error reading rules.json: {e}")
+    return {
+        "customer_name": "Nova Enterprise Customer",
+        "rules": {
+            "consignee_name": {"type": "exact_match", "expected": "Nova Logistics Ltd"},
+            "hs_code": {"type": "prefix_match", "expected_prefixes": ["8708"]},
+            "incoterms": {"type": "allow_list", "expected": ["FOB", "CIF"]},
+            "port_of_loading": {"type": "allow_list", "expected": ["Port of Shanghai, China", "Shanghai Port"]},
+            "port_of_discharge": {"type": "allow_list", "expected": ["Port of Singapore, Singapore", "Singapore Port"]},
+            "invoice_number": {"type": "pattern_match", "expected_pattern": "^INV-\\d{4}-\\d{4}$"},
+            "gross_weight": {"type": "numeric_limit", "expected_max": 2000.0}
+        }
+    }
+
 @router.get("/incoming")
 async def get_incoming_emails():
     """Retrieves incoming/unprocessed supplier email submissions."""
@@ -94,6 +121,28 @@ async def update_run_status(run_id: int, request: UpdateStatusRequest):
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found.")
 
     logger.info(f"Human review saved for Run {run_id}. Status set to '{request.status}'.")
+
+    # Update cache if auditor approved or amended the run
+    try:
+        run = await db_service.get_run_by_id(run_id)
+        if run and run.get("shipment_id"):
+            files = await db_service.get_shipment_files(run["shipment_id"])
+            file_hashes = [f.get("file_hash") for f in files if f.get("file_hash")]
+            if file_hashes:
+                cache_key = hash_service.build_shipment_cache_key(file_hashes)
+                cached_data = {
+                    "extracted_data": request.edited_data or run.get("extracted_data") or {},
+                    "validation_results": run.get("validation_results") or {},
+                    "decision": run.get("decision", "auto_approve"),
+                    "decision_reason": run.get("decision_reason", "Verified and signed off by human auditor"),
+                    "amendment_draft": request.amendment_draft or run.get("amendment_draft"),
+                    "status": request.status,
+                    "cross_doc_results": run.get("cross_doc_results") or {"is_consistent": True, "discrepancies": []}
+                }
+                await cache_service.set_shipment_cache(cache_key, cached_data)
+                logger.info(f"Updated Redis cache for key: {cache_key} with auditor decision '{request.status}'.")
+    except Exception as ce:
+        logger.warning(f"Could not update Redis cache upon human review: {ce}")
 
     # If operator modified fields, re-enqueue for validation re-check
     if request.edited_data:

@@ -16,7 +16,17 @@ from interfaces.queries import (
     UPDATE_RUN_STATUS_SQL,
     COUNT_TOTAL_RUNS_SQL,
     COUNT_DECISIONS_GROUPED_SQL,
-    COUNT_STATUSES_GROUPED_SQL
+    COUNT_STATUSES_GROUPED_SQL,
+    ANALYTICS_SOURCE_BREAKDOWN_SQL,
+    ANALYTICS_CACHE_STATS_SQL,
+    ANALYTICS_DAILY_THROUGHPUT_SQL,
+    ANALYTICS_HOURLY_THROUGHPUT_SQL,
+    ANALYTICS_TOP_MISMATCH_FIELDS_SQL,
+    ANALYTICS_RECENT_RUNS_SQL,
+    ANALYTICS_FAILURE_RATE_SQL,
+    SELECT_RUN_BY_FILE_HASHES_SQL,
+    UPDATE_FILE_HASH_SQL,
+    APPLY_CACHED_OUTCOME_SQL
 )
 
 class PostgresPipelineRunRepository(PipelineRunRepository):
@@ -86,7 +96,7 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                 await cur.execute(MARK_FILE_UPLOADED_SQL, (shipment_id, s3_key))
 
                 # 2. Check and atomically transition run status if all files uploaded
-                await cur.execute(CHECK_AND_TRANSITION_SHIPMENT_SQL, (shipment_id, shipment_id))
+                await cur.execute(CHECK_AND_TRANSITION_SHIPMENT_SQL, (shipment_id, shipment_id, shipment_id))
                 res = await cur.fetchone()
 
                 # If status returned is 'processing', this call completed the batch!
@@ -225,9 +235,10 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                 return cur.rowcount > 0
 
     async def get_analytics(self) -> Dict[str, Any]:
-        """Calculates aggregated metrics for dashboard status cards."""
+        """Calculates comprehensive production analytics metrics."""
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
+                # Core counts
                 await cur.execute(COUNT_TOTAL_RUNS_SQL)
                 total_res = await cur.fetchone()
                 total = total_res["total"] if total_res else 0
@@ -238,12 +249,213 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                 await cur.execute(COUNT_STATUSES_GROUPED_SQL)
                 statuses = {row["status"]: row["count"] for row in await cur.fetchall()}
 
+                # Source breakdown (manual_upload vs inbox)
+                sources = {}
+                try:
+                    await cur.execute(ANALYTICS_SOURCE_BREAKDOWN_SQL)
+                    sources = {row["source"]: row["count"] for row in await cur.fetchall()}
+                except Exception:
+                    pass
+
+                # Cache hit/miss rates
+                cache_hits = 0
+                cache_misses = 0
+                try:
+                    await cur.execute(ANALYTICS_CACHE_STATS_SQL)
+                    cache_row = await cur.fetchone()
+                    if cache_row:
+                        cache_hits = cache_row.get("cache_hits") or 0
+                        cache_misses = cache_row.get("cache_misses") or 0
+                except Exception:
+                    pass
+
+                # Daily throughput (last 30 days)
+                daily_throughput = []
+                try:
+                    await cur.execute(ANALYTICS_DAILY_THROUGHPUT_SQL)
+                    for row in await cur.fetchall():
+                        daily_throughput.append({
+                            "date": row["date"].isoformat() if row.get("date") else None,
+                            "total": row.get("total") or 0,
+                            "auto_approved": row.get("auto_approved") or 0,
+                            "flagged": row.get("flagged") or 0,
+                            "amendments": row.get("amendments") or 0
+                        })
+                except Exception:
+                    pass
+
+                # Hourly distribution (peak hours)
+                hourly_dist = {}
+                try:
+                    await cur.execute(ANALYTICS_HOURLY_THROUGHPUT_SQL)
+                    hourly_dist = {row["hour"]: row["count"] for row in await cur.fetchall() if row.get("hour") is not None}
+                except Exception:
+                    pass
+
+                # Top mismatch fields
+                top_mismatches = []
+                try:
+                    await cur.execute(ANALYTICS_TOP_MISMATCH_FIELDS_SQL)
+                    for row in await cur.fetchall():
+                        top_mismatches.append({"field": row["field"], "count": row["count"]})
+                except Exception:
+                    pass
+
+                # Recent runs
+                recent_runs = []
+                try:
+                    await cur.execute(ANALYTICS_RECENT_RUNS_SQL)
+                    for row in await cur.fetchall():
+                        recent_runs.append({
+                            "id": row["id"],
+                            "shipment_id": row["shipment_id"],
+                            "filename": row["filename"],
+                            "decision": row["decision"],
+                            "status": row["status"],
+                            "source": row["source"],
+                            "upload_time": row["upload_time"].isoformat() if row.get("upload_time") else None
+                        })
+                except Exception:
+                    pass
+
+                # Failure rate
+                failed = 0
+                completed = 0
+                try:
+                    await cur.execute(ANALYTICS_FAILURE_RATE_SQL)
+                    fail_row = await cur.fetchone()
+                    if fail_row:
+                        failed = fail_row.get("failed") or 0
+                        completed = fail_row.get("completed") or 0
+                except Exception:
+                    pass
+
+                # Derived metrics
+                auto_approve_count = decisions.get("auto_approve", 0)
+                flag_review_count = decisions.get("flag_review", 0)
+                amendment_count = decisions.get("amendment_request", 0)
+                processed_total = auto_approve_count + flag_review_count + amendment_count
+                auto_approve_rate = round((auto_approve_count / processed_total * 100), 1) if processed_total > 0 else 0.0
+                compliance_score = round(((auto_approve_count) / processed_total * 100), 1) if processed_total > 0 else 0.0
+                cache_hit_rate = round((cache_hits / (cache_hits + cache_misses) * 100), 1) if (cache_hits + cache_misses) > 0 else 0.0
+                failure_rate = round((failed / (failed + completed) * 100), 1) if (failed + completed) > 0 else 0.0
+
                 return {
+                    # Core metrics (backward compatible)
                     "total_runs": total,
-                    "auto_approved": decisions.get("auto_approve", 0),
-                    "flagged_for_review": decisions.get("flag_review", 0),
-                    "amendments_requested": decisions.get("amendment_request", 0),
-                    "statuses": statuses
+                    "decisions": {
+                        "auto_approve": auto_approve_count,
+                        "flag_review": flag_review_count,
+                        "amendment_request": amendment_count
+                    },
+                    "statuses": {
+                        "pending_review": statuses.get("pending_review", 0),
+                        "approved": statuses.get("approved", 0),
+                        "amended": statuses.get("amended", 0),
+                        "processing": statuses.get("processing", 0),
+                        "failed": statuses.get("failed", 0),
+                        "pending_upload": statuses.get("pending_upload", 0)
+                    },
+                    # Production KPIs
+                    "kpis": {
+                        "auto_approve_rate": auto_approve_rate,
+                        "compliance_score": compliance_score,
+                        "cache_hit_rate": cache_hit_rate,
+                        "failure_rate": failure_rate,
+                        "total_processed": processed_total
+                    },
+                    # Source breakdown
+                    "sources": {
+                        "manual_upload": sources.get("manual_upload", 0),
+                        "inbox": sources.get("inbox", 0)
+                    },
+                    # Cache performance
+                    "cache": {
+                        "hits": cache_hits,
+                        "misses": cache_misses,
+                        "hit_rate": cache_hit_rate
+                    },
+                    # Time-series data
+                    "daily_throughput": daily_throughput,
+                    "hourly_distribution": hourly_dist,
+                    # Compliance insights
+                    "top_mismatch_fields": top_mismatches,
+                    "recent_runs": recent_runs,
+                    # Backward compat flat fields
+                    "auto_approved": auto_approve_count,
+                    "flagged_for_review": flag_review_count,
+                    "amendments_requested": amendment_count
                 }
+
+    async def find_cached_outcome_by_hashes(self, file_hashes: List[str]) -> Optional[Dict[str, Any]]:
+        """Queries PostgreSQL for any previously completed run matching the file hashes."""
+        if not file_hashes:
+            return None
+        async with get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(SELECT_RUN_BY_FILE_HASHES_SQL, (file_hashes,))
+                row = await cur.fetchone()
+                if not row:
+                    return None
+
+                ext_data = row.get("extracted_data") or {}
+                if isinstance(ext_data, str):
+                    try:
+                        ext_data = json.loads(ext_data)
+                    except Exception:
+                        ext_data = {}
+                if not ext_data:
+                    return None
+
+                val_results = row.get("validation_results") or {}
+                if isinstance(val_results, str):
+                    try:
+                        val_results = json.loads(val_results)
+                    except Exception:
+                        val_results = {}
+
+                cross_results = row.get("cross_doc_results") or {"is_consistent": True, "discrepancies": []}
+                if isinstance(cross_results, str):
+                    try:
+                        cross_results = json.loads(cross_results)
+                    except Exception:
+                        cross_results = {"is_consistent": True, "discrepancies": []}
+
+                return {
+                    "extracted_data": ext_data,
+                    "validation_results": val_results,
+                    "decision": row.get("decision", "auto_approve"),
+                    "decision_reason": row.get("decision_reason", "Verified from previous run"),
+                    "amendment_draft": row.get("amendment_draft"),
+                    "status": row.get("status", "approved"),
+                    "cross_doc_results": cross_results
+                }
+
+    async def update_file_hash(self, shipment_id: str, s3_key: str, file_hash: str) -> None:
+        """Updates the SHA-256 fingerprint of a shipment file record."""
+        async with get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(UPDATE_FILE_HASH_SQL, (file_hash, shipment_id, s3_key))
+
+    async def apply_cached_outcome_to_run(self, shipment_id: str, cached_data: Dict[str, Any]) -> None:
+        """Applies cached compliance results directly to a queued shipment run in PostgreSQL."""
+        decision = cached_data.get("decision", "auto_approve")
+        status = "approved" if decision == "auto_approve" else "pending_review"
+
+        async with get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    APPLY_CACHED_OUTCOME_SQL,
+                    (
+                        json.dumps(cached_data.get("extracted_data", {})),
+                        json.dumps(cached_data.get("validation_results", {})),
+                        decision,
+                        cached_data.get("decision_reason", "Instant verification from cache"),
+                        cached_data.get("amendment_draft"),
+                        status,
+                        json.dumps(cached_data.get("cross_doc_results", {"is_consistent": True, "discrepancies": []})),
+                        shipment_id
+                    )
+                )
 
 db_service: PipelineRunRepository = PostgresPipelineRunRepository()

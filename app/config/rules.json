@@ -1,0 +1,34 @@
+{
+  "customer_name": "Nova Enterprise Customer",
+  "rules": {
+    "consignee_name": {
+      "type": "exact_match",
+      "expected": "Nova Logistics Ltd"
+    },
+    "hs_code": {
+      "type": "prefix_match",
+      "expected_prefixes": ["8708"]
+    },
+    "incoterms": {
+      "type": "allow_list",
+      "expected": ["FOB", "CIF"]
+    },
+    "port_of_loading": {
+      "type": "allow_list",
+      "expected": ["Port of Shanghai, China", "Shanghai Port"]
+    },
+    "port_of_discharge": {
+      "type": "allow_list",
+      "expected": ["Port of Singapore, Singapore", "Singapore Port"]
+    },
+    "invoice_number": {
+      "type": "pattern_match",
+      "expected_pattern": "^INV-\\d{4}-\\d{4}$"
+    },
+    "gross_weight": {
+      "type": "numeric_limit",
+      "expected_max": 2000.0
+    }
+  }
+}
+

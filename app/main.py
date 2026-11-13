@@ -1,3 +1,8 @@
+import sys
+import asyncio
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -33,11 +38,35 @@ async def lifespan(app: FastAPI):
 
     # Verify or initialize S3 bucket
     s3_service.ensure_bucket_exists()
-    
+
+    # Launch Embedded Agent Worker (Queue consumer) if enabled
+    worker_task = None
+    worker_daemon = None
+    if getattr(settings, "run_embedded_worker", False):
+        try:
+            from pathlib import Path
+            agent_path = Path(__file__).resolve().parent.parent.parent / "agent" / "logistics-workflow-automation-agent1"
+            if str(agent_path) not in sys.path:
+                sys.path.insert(0, str(agent_path))
+
+            from services.worker_daemon import TradeDocWorkerDaemon
+            worker_daemon = TradeDocWorkerDaemon()
+            worker_task = asyncio.create_task(worker_daemon.start())
+            logger.info("Embedded Trade Document Agent Worker started in background task.")
+        except Exception as we:
+            logger.warning(f"Could not start embedded agent worker: {we}")
+
     yield
 
     # Clean up on shutdown
     logger.info("Shutting down and draining database and Redis pools...")
+    if worker_daemon:
+        try:
+            worker_daemon.stop()
+        except Exception:
+            pass
+    if worker_task and not worker_task.done():
+        worker_task.cancel()
     await close_redis_pool()
     await close_db_pool()
     logger.info(f"Shutting down {settings.app_name}...")
