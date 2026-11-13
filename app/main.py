@@ -45,7 +45,16 @@ async def lifespan(app: FastAPI):
     if getattr(settings, "run_embedded_worker", False):
         try:
             from pathlib import Path
-            agent_path = Path(__file__).resolve().parent.parent.parent / "agent" / "logistics-workflow-automation-agent1"
+            # On Render: rootDir=gateway, so repo root is one level up from gateway/
+            # Local: repo root is two levels up from gateway/app/
+            # We try both: resolve relative to main.py's parent chain
+            _app_dir = Path(__file__).resolve().parent          # gateway/app
+            _gateway_dir = _app_dir.parent                      # gateway
+            _repo_root = _gateway_dir.parent                    # repo root
+            agent_path = _repo_root / "agent" / "logistics-workflow-automation-agent1"
+            if not agent_path.exists():
+                # Fallback: Render may place repo root at gateway level
+                agent_path = _gateway_dir / "agent" / "logistics-workflow-automation-agent1"
             if str(agent_path) not in sys.path:
                 sys.path.insert(0, str(agent_path))
 
