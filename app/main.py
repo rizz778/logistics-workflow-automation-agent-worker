@@ -44,18 +44,48 @@ async def lifespan(app: FastAPI):
     worker_daemon = None
     if getattr(settings, "run_embedded_worker", False):
         try:
+            import importlib.util
             from pathlib import Path
+
             _app_dir = Path(__file__).resolve().parent    # .../app/
-            _repo_root = _app_dir.parent                  # repo root (gateway repo OR parent monorepo)
+            _repo_root = _app_dir.parent                  # repo root
             # Render: agent/ is at repo root (copied alongside app/)
-            # Local monorepo: agent is at ../../agent/logistics-workflow-automation-agent1
+            # Local monorepo fallback
             agent_path = _repo_root / "agent"
             if not agent_path.exists():
                 agent_path = _repo_root.parent / "agent" / "logistics-workflow-automation-agent1"
+
+            # Add agent root to sys.path FIRST so agent's own internal imports
+            # (config.settings, db.checkpointer, graph.graph, etc.) resolve correctly
             if str(agent_path) not in sys.path:
                 sys.path.insert(0, str(agent_path))
 
-            from services.worker_daemon import TradeDocWorkerDaemon
+            # The gateway (app/) and agent share package names: config, db,
+            # interfaces, prompts, schemas, services. We must temporarily
+            # evict the gateway's cached modules so the agent's own imports
+            # resolve to agent/ instead of app/.
+            _colliding = ("config", "db", "interfaces", "prompts", "schemas", "services")
+            _saved_modules = {}
+            for _pkg in list(sys.modules):
+                if _pkg.split(".")[0] in _colliding:
+                    _saved_modules[_pkg] = sys.modules.pop(_pkg)
+
+            # Use importlib to load worker_daemon from the exact file path
+            worker_module_path = agent_path / "services" / "worker_daemon.py"
+            logger.info(f"Loading agent worker from: {worker_module_path}")
+
+            spec = importlib.util.spec_from_file_location(
+                "agent_worker_daemon", str(worker_module_path)
+            )
+            worker_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(worker_module)
+
+            # Restore the gateway's modules so gateway code keeps working
+            # (agent modules stay cached under their new names too)
+            for _pkg, _mod in _saved_modules.items():
+                sys.modules[_pkg] = _mod
+
+            TradeDocWorkerDaemon = worker_module.TradeDocWorkerDaemon
             worker_daemon = TradeDocWorkerDaemon()
             worker_task = asyncio.create_task(worker_daemon.start())
             logger.info("Embedded Trade Document Agent Worker started in background task.")
