@@ -102,6 +102,17 @@ async def generate_presigned_urls(request: PresignedUrlsRequest):
                 logger.info(f"⚡ Found completed run in PostgreSQL! Re-populating Redis cache for key: {cache_key}")
                 await cache_service.set_shipment_cache(cache_key, cached_result)
 
+        # Validate that cached_result matches all files if multi-document
+        if cached_result and len(request.files) > 1:
+            cached_ext = cached_result.get("extracted_data") or {}
+            first_val = list(cached_ext.values())[0] if cached_ext else None
+            is_multi = first_val and isinstance(first_val, dict) and "value" not in first_val
+            if not is_multi or len(cached_ext) < len(request.files):
+                logger.warning(
+                    f"Cached outcome for multi-file shipment ({len(request.files)} files) has only {len(cached_ext)} doc(s). Ignoring."
+                )
+                cached_result = None
+
         if cached_result:
             CACHE_HITS_TOTAL.inc()
             logger.info(f"⚡ FAST-PATH CACHE HIT for shipment {shipment_id}. Bypassing S3 upload and worker queue.")
@@ -112,7 +123,8 @@ async def generate_presigned_urls(request: PresignedUrlsRequest):
                     source=request.source,
                     shipment_id=shipment_id,
                     email_sender=request.email_sender,
-                    email_metadata=request.email_metadata
+                    email_metadata=request.email_metadata,
+                    files=[f.model_dump() for f in request.files]
                 )
                 return PresignedUrlsResponse(
                     run_id=run_id,
@@ -234,6 +246,17 @@ async def confirm_upload(request: ConfirmUploadRequest):
                 if cached_result:
                     await cache_service.set_shipment_cache(cache_key, cached_result)
 
+            # Validate that cached_result matches all files if multi-document
+            if cached_result and len(files) > 1:
+                cached_ext = cached_result.get("extracted_data") or {}
+                first_val = list(cached_ext.values())[0] if cached_ext else None
+                is_multi = first_val and isinstance(first_val, dict) and "value" not in first_val
+                if not is_multi or len(cached_ext) < len(files):
+                    logger.warning(
+                        f"Cached outcome for confirmed multi-file shipment ({len(files)} files) has only {len(cached_ext)} doc(s). Ignoring."
+                    )
+                    cached_result = None
+
             if cached_result:
                 CACHE_HITS_TOTAL.inc()
                 logger.info(f"⚡ FAST-PATH CACHE HIT on confirmed upload for shipment {shipment_id}. Bypassing worker queue.")
@@ -315,7 +338,8 @@ async def upload_direct_file(
                 cached_data=cached_result,
                 filenames=[filename],
                 source=source,
-                shipment_id=shipment_id
+                shipment_id=shipment_id,
+                files=[{"filename": filename, "s3_key": s3_key, "file_hash": file_hash, "content_type": content_type}]
             )
             return {
                 "id": run_id,

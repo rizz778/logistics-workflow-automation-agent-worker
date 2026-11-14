@@ -21,4 +21,8 @@ class ShipmentTaskEvent(BaseModel):
     email_metadata: Optional[Dict[str, Any]] = None
     traceparent: Optional[str] = None
     error_history: List[str] = Field(default_factory=list)
+    # Human validation loop tracking
+    human_review_count: int = Field(default=0, ge=0)
+    max_human_reviews: int = Field(default=3, ge=1)
+    edited_data: Optional[Dict[str, Any]] = None
 

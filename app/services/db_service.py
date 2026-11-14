@@ -109,12 +109,45 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                 await cur.execute(SELECT_SHIPMENT_FILES_SQL, (shipment_id,))
                 return await cur.fetchall()
 
+    @staticmethod
+    def _format_run_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Helper to format a raw pipeline_run row with filenames, email_subject, email_body, received_at."""
+        if not row:
+            return None
+        row_dict = dict(row)
+
+        meta = row_dict.get("email_metadata_json")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        elif not isinstance(meta, dict):
+            meta = {}
+
+        if not row_dict.get("email_subject"):
+            row_dict["email_subject"] = meta.get("subject")
+        if not row_dict.get("email_body"):
+            row_dict["email_body"] = meta.get("body")
+        if not row_dict.get("received_at"):
+            raw_time = row_dict.get("upload_time")
+            if raw_time and hasattr(raw_time, "isoformat"):
+                row_dict["received_at"] = raw_time.isoformat()
+            else:
+                row_dict["received_at"] = meta.get("received_at") or str(raw_time or "")
+
+        filename_str = row_dict.get("filename") or ""
+        if not row_dict.get("filenames"):
+            row_dict["filenames"] = [f.strip() for f in filename_str.split(",") if f.strip()]
+
+        return row_dict
+
     async def get_run_by_shipment_id(self, shipment_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves a shipment run by its unique shipment_id string."""
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(SELECT_RUN_BY_SHIPMENT_ID_SQL, (shipment_id,))
-                return await cur.fetchone()
+                return self._format_run_row(await cur.fetchone())
 
     async def create_cached_run(
         self,
@@ -123,7 +156,8 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
         source: str = "manual_upload",
         shipment_id: Optional[str] = None,
         email_sender: Optional[str] = None,
-        email_metadata: Optional[Dict[str, Any]] = None
+        email_metadata: Optional[Dict[str, Any]] = None,
+        files: Optional[List[Dict[str, Any]]] = None
     ) -> int:
         """Clones a cached pipeline result into a new run record with zero worker latency."""
         filename_str = ", ".join(filenames)
@@ -153,14 +187,33 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                     )
                 )
                 row = await cur.fetchone()
-                return row["id"]
+                run_id = row["id"]
+
+                # Insert expected files into shipment_files so files are tracked and preview URLs work
+                for f in (files or []):
+                    fn = f.get("filename") if isinstance(f, dict) else getattr(f, "filename", None)
+                    if not fn:
+                        continue
+                    s3_k = (f.get("s3_key") if isinstance(f, dict) else getattr(f, "s3_key", None)) or f"shipments/{shipment_id}/{fn}"
+                    fh = f.get("file_hash") if isinstance(f, dict) else getattr(f, "file_hash", None)
+                    ct = (f.get("content_type") if isinstance(f, dict) else getattr(f, "content_type", None)) or "application/pdf"
+                    await cur.execute(
+                        """
+                        INSERT INTO shipment_files (
+                            shipment_id, run_id, filename, s3_key, file_hash, content_type, status
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 'uploaded');
+                        """,
+                        (shipment_id, run_id, fn, s3_k, fh, ct)
+                    )
+
+                return run_id
 
     async def get_run_by_id(self, run_id: int) -> Optional[Dict[str, Any]]:
         """Retrieves a single shipment run by its database ID."""
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(SELECT_RUN_BY_ID_SQL, (run_id,))
-                return await cur.fetchone()
+                return self._format_run_row(await cur.fetchone())
 
     async def get_all_runs(
         self,
@@ -201,7 +254,7 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
 
                 return {
                     "total": total,
-                    "runs": runs,
+                    "runs": [self._format_run_row(r) for r in runs],
                     "limit": limit,
                     "offset": offset
                 }
@@ -211,14 +264,14 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(SELECT_INCOMING_RUNS_SQL)
-                return await cur.fetchall()
+                return [self._format_run_row(r) for r in await cur.fetchall()]
 
     async def get_processed_runs(self) -> List[Dict[str, Any]]:
         """Retrieves all processed/resolved inbox runs (status != 'pending_review', source = 'inbox')."""
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(SELECT_PROCESSED_RUNS_SQL)
-                return await cur.fetchall()
+                return [self._format_run_row(r) for r in await cur.fetchall()]
 
     async def update_run_status(
         self,
@@ -391,9 +444,10 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
         """Queries PostgreSQL for any previously completed run matching the file hashes."""
         if not file_hashes:
             return None
+        num_hashes = len(file_hashes)
         async with get_db_connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(SELECT_RUN_BY_FILE_HASHES_SQL, (file_hashes,))
+                await cur.execute(SELECT_RUN_BY_FILE_HASHES_SQL, (file_hashes, num_hashes, num_hashes, num_hashes))
                 row = await cur.fetchone()
                 if not row:
                     return None
@@ -406,6 +460,13 @@ class PostgresPipelineRunRepository(PipelineRunRepository):
                         ext_data = {}
                 if not ext_data:
                     return None
+
+                # For multi-document packets, verify that extracted_data actually has entries for each document
+                if num_hashes > 1:
+                    first_val = list(ext_data.values())[0] if ext_data else None
+                    is_multi = first_val and isinstance(first_val, dict) and "value" not in first_val
+                    if not is_multi or len(ext_data) < num_hashes:
+                        return None
 
                 val_results = row.get("validation_results") or {}
                 if isinstance(val_results, str):

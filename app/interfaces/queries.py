@@ -46,6 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_shipment_files_shipment_id ON shipment_files (shi
 CREATE INDEX IF NOT EXISTS idx_shipment_files_s3_key ON shipment_files (s3_key);
 
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS human_review_count INT NOT NULL DEFAULT 0;
 """
 
 HEALTH_CHECK_SQL = "SELECT 1;"
@@ -107,13 +108,15 @@ RETURNING status, uploaded_files_count, total_files_expected;
 
 SELECT_INCOMING_RUNS_SQL = """
 SELECT * FROM pipeline_runs
-WHERE source = 'inbox' AND status = 'pending_review'
+WHERE source = 'inbox' 
+  AND status NOT IN ('approved', 'amended', 'completed')
 ORDER BY id DESC;
 """
 
 SELECT_PROCESSED_RUNS_SQL = """
 SELECT * FROM pipeline_runs
-WHERE source = 'inbox' AND status != 'pending_review'
+WHERE source = 'inbox' 
+  AND status IN ('approved', 'amended', 'completed')
 ORDER BY id DESC;
 """
 
@@ -207,6 +210,9 @@ WHERE f.file_hash = ANY(%s::text[])
   AND r.status IN ('approved', 'completed', 'amended', 'pending_review', 'pending_approval')
   AND r.extracted_data IS NOT NULL
   AND r.extracted_data::text NOT IN ('{}', 'null', '""')
+GROUP BY r.id
+HAVING COUNT(DISTINCT f.file_hash) = %s
+   AND (r.total_files_expected = %s OR (SELECT COUNT(*) FROM shipment_files sf WHERE sf.shipment_id = r.shipment_id OR sf.run_id = r.id) = %s)
 ORDER BY r.id DESC
 LIMIT 1;
 """

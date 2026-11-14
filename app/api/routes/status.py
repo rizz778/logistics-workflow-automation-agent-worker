@@ -153,6 +153,8 @@ async def update_run_status(run_id: int, request: UpdateStatusRequest):
                 TaskFileItem(filename=f["filename"], s3_key=f["s3_key"])
                 for f in files
             ]
+            # Carry forward the current review count so worker can increment it
+            current_review_count = run.get("human_review_count", 0) or 0
             reprocess_task = ShipmentTaskEvent(
                 run_id=run_id,
                 shipment_id=run["shipment_id"],
@@ -160,10 +162,13 @@ async def update_run_status(run_id: int, request: UpdateStatusRequest):
                 retry_count=0,
                 max_retries=3,
                 files=task_files,
-                source=run.get("source", "manual_upload")
+                source=run.get("source", "manual_upload"),
+                human_review_count=current_review_count,
+                max_human_reviews=3,
+                edited_data=request.edited_data
             )
             await queue_service.publish_shipment_task(reprocess_task)
-            logger.info(f"Re-enqueued Run {run_id} as 'HUMAN_EDIT_REPROCESS' to re-verify compliance.")
+            logger.info(f"Re-enqueued Run {run_id} as 'HUMAN_EDIT_REPROCESS' (review attempt {current_review_count + 1}/3).")
 
     return {
         "status": "success",

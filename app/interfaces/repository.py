@@ -46,7 +46,8 @@ class PipelineRunRepository(ABC):
         source: str = "manual_upload",
         shipment_id: Optional[str] = None,
         email_sender: Optional[str] = None,
-        email_metadata: Optional[Dict[str, Any]] = None
+        email_metadata: Optional[Dict[str, Any]] = None,
+        files: Optional[List[Dict[str, Any]]] = None
     ) -> int:
         """Clones a cached pipeline result into a new run record with zero worker latency."""
         pass
